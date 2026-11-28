@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .. import model_server
 from . import download, hardware, install
-from .manifest import Manifest
+from .manifest import Manifest, NAME, SHA
 
 DATA_NAME = install.DATA_NAME
 WORK_SUFFIX = '.setup'
@@ -434,19 +434,13 @@ class Setup:
                                    'bytes': map_bytes,
                                    'included': install.map_unit(self.current, name) == self.current and not install.has_separate_map(self.current),
                                    'update_available': bool(source and current and source != current)})
-        address_indexes = []
-        installed_address_indexes = []
-        for name in self.address_indexes():
-            entry = self.manifest.address_index(name)
-            path = self.current / 'derived' / 'geo' / 'addresses' / (name + '.sqlite')
-            try:
-                bytes_on_disk = path.stat().st_size
-            except OSError:
-                continue
-            if bytes_on_disk != entry['installed_bytes']:
-                continue
-            address_indexes.append(name)
-            installed_address_indexes.append({'id': name, 'title': entry['title'], 'bytes': bytes_on_disk})
+        installed = self._installed_addresses()
+        address_indexes = self.address_indexes(installed)
+        installed_address_indexes = [
+            {'id': name, 'title': (self.manifest.address_index(name) or self.manifest.map(name) or {}).get('title', name),
+             'bytes': bytes_on_disk}
+            for name, (bytes_on_disk, _) in installed.items()
+        ]
         return {'folder': str(self.current), 'pack': pack, 'content_revision': revision, 'map_bytes': install.map_bytes(self.current), 'model': model, 'map': install.map_name(self.current), 'installed_maps': installed_maps, 'address_indexes': address_indexes, 'installed_address_indexes': installed_address_indexes, 'old': self._settings().get('old', []),
                 'checked': self._settings().get('checks', {}).get(str(self.current)),   # the last full check of this library (Check now, Repair)
                 **self._cloud_only()}
@@ -471,20 +465,41 @@ class Setup:
                 self.cloud_thread.start()
             return {'cloud_only': kept[2], 'cloud_counting': False} if kept else {'cloud_only': None, 'cloud_counting': True}
 
-    def address_indexes(self):
+    def _installed_addresses(self):
+        """Inventory managed files from local receipts. The catalog can change while those files stay on disk."""
         if not self.current:
-            return []
-        out = []
-        for entry in self.manifest.current.get('address_indexes', []):
-            path = self.current / 'derived' / 'geo' / 'addresses' / (entry['id'] + '.sqlite')
+            return {}
+        relative = Path('derived/geo/addresses')
+        folder = self.current / relative
+        try:
+            if folder.resolve() != self.current.resolve() / relative:
+                return {}
+            receipts = sorted(folder.glob('*.json'))
+        except (OSError, RuntimeError):
+            return {}
+        installed = {}
+        for receipt in receipts:
+            name = receipt.stem
+            if not NAME.fullmatch(name):
+                continue
             try:
-                receipt = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
-                expected = {file['name']: file['sha256'] for file in entry['files']}
-                if path.is_file() and path.stat().st_size == entry['installed_bytes'] and receipt.get('files') == expected:
-                    out.append(entry['id'])
+                index = receipt.with_suffix('.sqlite').lstat()
+                if not stat.S_ISREG(index.st_mode) or not index.st_size or not stat.S_ISREG(receipt.lstat().st_mode):
+                    continue
+                files = json.loads(receipt.read_text(encoding='utf-8')).get('files')
+                if isinstance(files, dict) and files and all(
+                        NAME.fullmatch(f) and isinstance(digest, str) and SHA.fullmatch(digest) for f, digest in files.items()):
+                    installed[name] = (index.st_size, files)
             except (OSError, ValueError, AttributeError):
                 pass
-        return out
+        return installed
+
+    def address_indexes(self, installed=None):
+        """The installed indexes that match the currently offered download."""
+        if installed is None:
+            installed = self._installed_addresses()
+        return [entry['id'] for entry in self.manifest.current.get('address_indexes', [])
+                if _address_matches(entry, installed)]
 
     def found(self):
         """Files in app-owned storage, the selected library, or explicitly chosen by the person. A file is offered when its size matches; its
@@ -1359,7 +1374,7 @@ class Setup:
                         return {'error': (note or {}).get('error') or 'The map could not be installed. Try downloading it again.',
                                 'code': 'activate'}
                     install.confirm(pending)
-                elif job['plan']['addresses']['id'] not in self.address_indexes():
+                elif not _address_matches(job['plan']['addresses'], self._installed_addresses()):
                     return {'error': 'The address search download could not be confirmed. Try downloading it again.', 'code': 'activate'}
                 _job_file(self.settings_dir).unlink(missing_ok=True)
                 settings = self._settings()
@@ -1472,7 +1487,7 @@ class Setup:
                 return {'error': 'Restart Lastbook to finish activating the previous download first.', 'code': 'pending'}
             if self.job and self.job['state'] in ACTIVE + ('paused',):
                 return {'error': 'A download is under way. Pause or cancel it first.', 'code': 'busy'}
-            if name not in self.address_indexes():
+            if not isinstance(name, str) or name not in self._installed_addresses():
                 return {'error': 'That address search is not installed.', 'code': 'unknown'}
             path = self.current / 'derived' / 'geo' / 'addresses' / (name + '.sqlite')
             try:
@@ -1962,6 +1977,10 @@ def _tag_sources(job):
         else:
             names = []
         it['source'] = 'found' if names and all(n in plan['sources'] for n in names) else 'download'
+
+
+def _address_matches(entry, installed):
+    return installed.get(entry['id']) == (entry['installed_bytes'], {f['name']: f['sha256'] for f in entry['files']})
 
 
 def _map_need(mp, have):

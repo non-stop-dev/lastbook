@@ -4569,11 +4569,50 @@ class AddressIndexes(Maps):
         self.assertEqual(self.wait(setup)['state'], 'done')
         self.assertEqual(install.map_name(library), 'us')
         self.assertEqual((library / 'derived/geo/addresses/CA.sqlite').read_bytes(), payload)
-        self.assertEqual(setup.finish_map()['ok'], True)
+        with mock.patch.dict(mf.current, {'address_indexes': []}):
+            self.assertTrue(setup.finish_map()['ok'])
         self.assertIsNone(setup.job)
         self.assertEqual(setup.current_info()['address_indexes'], ['CA'])
         self.assertEqual(setup.current_info()['installed_address_indexes'],
                          [{'id': 'CA', 'title': 'California', 'bytes': len(payload)}])
+
+    def test_older_address_index_stays_visible_and_removable_offline(self):
+        mf, payload = self.address_manifest()
+        library = self.parent / 'LastbookData'
+        (library / 'library-data').mkdir(parents=True)
+        (library / 'library-data/catalog.json').write_text('{}')
+        (library / 'pack.json').write_text('{"name":"all","map":"us"}')
+        index = library / 'derived/geo/addresses/CA.sqlite'
+        index.parent.mkdir(parents=True)
+        index.write_bytes(payload)
+        receipt = index.with_suffix('.json')
+        revision = mf.current['address_indexes'][0]
+        previous = json.dumps({'files': {f['name']: f['sha256'] for f in revision['files']}})
+        receipt.write_text(previous)
+        unmanaged = index.with_name('AL.sqlite')
+        unmanaged.write_bytes(b'local index without an install receipt')
+        revision['installed_bytes'] += 4096
+        revision['files'][0]['sha256'] = '1' * 64
+        map_file = index.parent.parent / 'map.sqlite'
+        map_file.write_bytes(b'bundled map fixture')
+        setup = self.setup('manage', current=library, manifest=mf)
+
+        info = setup.current_info()
+        self.assertEqual(info['installed_address_indexes'],
+                         [{'id': 'CA', 'title': 'California', 'bytes': len(payload)}])
+        self.assertEqual(info['address_indexes'], [])   # the existing index is not the currently offered revision
+        mf.current['address_indexes'].clear()
+        self.assertEqual(setup.current_info()['installed_address_indexes'][0]['bytes'], len(payload))
+        self.assertEqual(index.read_bytes(), payload)
+        self.assertEqual(receipt.read_text(), previous)
+        self.assertEqual(setup.remove_address_index('AL')['code'], 'unknown')
+        self.assertEqual(unmanaged.read_bytes(), b'local index without an install receipt')
+        self.assertTrue(setup.remove_address_index('CA')['ok'])
+        self.assertFalse(index.exists())
+        self.assertFalse(receipt.exists())
+        self.assertEqual(setup.current_info()['installed_address_indexes'], [])
+        self.assertEqual(map_file.read_bytes(), b'bundled map fixture')
+        self.assertEqual(self.files.log, [])
 
     def test_cancel_completed_address_search_removes_its_index(self):
         mf, _ = self.address_manifest()

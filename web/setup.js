@@ -180,7 +180,7 @@
     const items = c.installed_address_indexes || [];
     const countries = new Map();
     for (const map of items) {
-      const place = locationOf(mapById(map.id) || addressById(map.id) || map) || { country: 'Other areas' };
+      const place = locationOf(mapById(map.id) || addressById(map.id) || { ...map, kind: 'state' });
       if (!countries.has(place.country)) countries.set(place.country, []);
       countries.get(place.country).push(map);
     }

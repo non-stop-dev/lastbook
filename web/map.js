@@ -240,6 +240,13 @@ const MapView = (() => {
       : st.have && !st.have.size && st.z >= 9 ? 'This download has the base map only: main roads, towns and water.' : '';
     statusLine();
   }
+  function statusLine(msg) {
+    const el = $('mstatus'); if (!el || !st) return;
+    if (msg != null) st.pinMsg = msg;
+    const parts = [st.pinMsg, st.coverNote].filter(Boolean);
+    el.innerHTML = parts.map(escH).join('<br>'); el.hidden = !parts.length;
+  }
+
   // The maps in the library: one is active and the person switches between them (/api/maps). Switching changes the
   // server's data version, so the map redraws from the new map's tiles and bounds (describe sets st.bounds).
   async function mapPicker() {
@@ -255,12 +262,6 @@ const MapView = (() => {
         st.national = info.national; st.aerialDetail = info.aerial_detail; st.aerialRev = info.aerial_rev; st.terrainCircle = info.terrain_circle;
         describe(info); st.ver = info.version; st.gen++; st.pinBox = null; coverage(); draw(); loadPins(); } catch { }
     });
-  }
-  function statusLine(msg) {
-    const el = $('mstatus'); if (!el || !st) return;
-    if (msg != null) st.pinMsg = msg;
-    const parts = [st.pinMsg, st.coverNote].filter(Boolean);
-    el.innerHTML = parts.map(escH).join('<br>'); el.hidden = !parts.length;
   }
 
   // ---------------------------------------------------------------- layers ----
